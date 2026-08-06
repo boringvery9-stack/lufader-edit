@@ -1,0 +1,375 @@
+import board
+import storage
+import neopixel
+import time
+from midi import midi_manager
+from settings import settings
+import constants as cfg
+
+class LightsManager:
+    # Pixel 0-3: buttons; 4-67: slider bars (16 pixels each); 68: indicator pixel above sliders
+    def __init__(self, num_pixels=69, pixel_pin=board.GP15, brightness=0.2):
+        self.num_pixels = num_pixels
+        self.pixel_pin = pixel_pin
+        self.brightness = brightness
+
+        # Initialize NeoPixel strip
+        self.pixels = neopixel.NeoPixel(
+            self.pixel_pin, self.num_pixels, brightness=self.brightness, auto_write=False
+        )
+        self.pixels.fill((0, 0, 0))
+        self.pixels.show()
+
+        # Button-to-pixel mapping
+        self.button_pixel_indices = {
+            0: 0,   # Bottom-left button
+            1: 1,
+            2: 2,
+            3: 3,   # Buttons mapped to pixels 0-3
+        }
+
+        # Slider-to-pixel mapping
+        self.slider_pixel_indices = {
+            0: list(range(4, 20)),   # Slider 1 pixels (4-19) - total 16
+            1: list(range(20, 36)),  # Slider 2 pixels (20-35) - total 16
+            2: list(range(36, 52)),  # Slider 3 pixels (36-51) - total 16
+            3: list(range(52, 68)),  # Slider 4 pixels (52-67) - total 16
+        }
+
+        # Indicator pixel above sliders
+        self.indicator_pixel_index = 68
+
+        # Multi-bank morphing state
+        self.morph_start_time = 0
+        self.morph_cycle_duration = 3.0  # seconds for full cycle through all colors
+        self.was_multi_bank = False  # Track for snap-back detection
+
+        # Default state
+        self.clear()
+        self.pixels[self.indicator_pixel_index] = cfg.REG_MODE_COLOR
+
+    def clear(self):
+        """Set all pixels to black/off."""
+        self.pixels.fill((0, 0, 0))
+
+    def update_slider_lights(self, sliders, bank_idx=0, page_idx=0, held_button_order=None, page_just_changed=False):
+        """更新推子燈號，並強制對齊 Page 獨立通道計算 Pick-up 值"""
+        # [新增] 絕對攔截點：只要推子有在亮，就一定能抓到現在是哪一頁
+        self._last_seen_page = page_idx
+        
+        if held_button_order is None:
+            held_button_order = []
+        
+        message_type = settings.get_resolved_message_type(page_idx, bank_idx)
+        is_multi_bank = len(held_button_order) > 1 and not page_just_changed
+        
+        if is_multi_bank and not self.was_multi_bank:
+            self.morph_start_time = time.monotonic()
+        
+        self.was_multi_bank = is_multi_bank
+        morphed_color = self._get_morphed_color(held_button_order, page_idx) if is_multi_bank else None
+        
+        for slider_idx, slider in enumerate(sliders):
+            slider_cc_value = slider.cc_value if hasattr(slider, 'cc_value') else slider
+
+            if message_type == "AT":
+                last_sent_cc_value = midi_manager.get_last_at_value_per_slider(slider_idx, page_idx, bank_idx)
+            else:
+                channel = page_idx
+                last_sent_cc_value = midi_manager.get_last_cc_value_sent(slider.current_assigned_cc_number, channel)
+            
+            if abs(slider_cc_value - last_sent_cc_value) > cfg.SLIDER_LIGHT_PICKUP_THRESHOLD:
+                cc_value = last_sent_cc_value
+            else:
+                cc_value = slider_cc_value
+
+            num_pixels = len(self.slider_pixel_indices[slider_idx])
+            lit_pixels = int((cc_value / 127) * num_pixels)
+            pixel_indices = self.slider_pixel_indices[slider_idx]
+
+            if morphed_color is not None:
+                color = morphed_color
+            else:
+                color = cfg.PAGE_COLORS[page_idx][bank_idx]
+
+            for i, pix_idx in enumerate(pixel_indices):
+                self.pixels[pix_idx] = color if i < lit_pixels else (0, 0, 0)
+        
+        message_type = settings.get_resolved_message_type(page_idx, bank_idx)
+        is_multi_bank = len(held_button_order) > 1 and not page_just_changed
+        
+        if is_multi_bank and not self.was_multi_bank:
+            self.morph_start_time = time.monotonic()
+        
+        self.was_multi_bank = is_multi_bank
+        morphed_color = self._get_morphed_color(held_button_order, page_idx) if is_multi_bank else None
+        
+        for slider_idx, slider in enumerate(sliders):
+            slider_cc_value = slider.cc_value if hasattr(slider, 'cc_value') else slider
+
+            # 取代舊的 Channel 陣列查詢，強制使用該 Page 的 Channel (索引 0 開始)
+            if message_type == "AT":
+                last_sent_cc_value = midi_manager.get_last_at_value_per_slider(slider_idx, page_idx, bank_idx)
+            else:
+                channel = page_idx
+                last_sent_cc_value = midi_manager.get_last_cc_value_sent(slider.current_assigned_cc_number, channel)
+            
+            if abs(slider_cc_value - last_sent_cc_value) > cfg.SLIDER_LIGHT_PICKUP_THRESHOLD:
+                cc_value = last_sent_cc_value
+            else:
+                cc_value = slider_cc_value
+
+            num_pixels = len(self.slider_pixel_indices[slider_idx])
+            lit_pixels = int((cc_value / 127) * num_pixels)
+            pixel_indices = self.slider_pixel_indices[slider_idx]
+
+            if morphed_color is not None:
+                color = morphed_color
+            else:
+                # 這裡會自動讀取我們在 constants.py 設定好的白/紅/黃/綠
+                color = cfg.PAGE_COLORS[page_idx][bank_idx]
+
+            for i, pix_idx in enumerate(pixel_indices):
+                self.pixels[pix_idx] = color if i < lit_pixels else (0, 0, 0)
+
+    def _get_morphed_color(self, held_button_order, page_idx):
+        """Return interpolated color for multi-bank morph, or None."""
+        if len(held_button_order) <= 1:
+            return None
+        
+        # Get all active colors in press order
+        colors = [cfg.PAGE_COLORS[page_idx][idx] for idx in held_button_order]
+        num_colors = len(colors)
+        
+        # Calculate where we are in the cycle (time-based)
+        elapsed = time.monotonic() - self.morph_start_time
+        cycle_progress = (elapsed % self.morph_cycle_duration) / self.morph_cycle_duration
+        
+        # Which color pair are we interpolating between?
+        segment_duration = 1.0 / num_colors
+        segment_idx = int(cycle_progress / segment_duration)
+        segment_progress = (cycle_progress % segment_duration) / segment_duration
+        
+        color1 = colors[segment_idx % num_colors]
+        color2 = colors[(segment_idx + 1) % num_colors]
+        
+        # Linear interpolate RGB
+        return (
+            int(color1[0] + (color2[0] - color1[0]) * segment_progress),
+            int(color1[1] + (color2[1] - color1[1]) * segment_progress),
+            int(color1[2] + (color2[2] - color1[2]) * segment_progress),
+        )
+
+    def update_buttons(self, buttons, page_idx, locked_bank_idx, page_just_changed=False, page_change_feedback=None):
+        """更新按鈕燈號，只亮起當前鎖定的 Bank，並處理 Page 切換的視覺回饋"""
+        if page_change_feedback is None:
+            page_change_feedback = {'page_change_mode': False, 'blink_button_idx': -1, 'blink_off': False}
+        
+        page_change_mode = page_change_feedback.get('page_change_mode', False)
+        blink_idx = page_change_feedback.get('blink_button_idx', -1)
+        blink_off = page_change_feedback.get('blink_off', False)
+
+        for idx in range(4):
+            pixel_index = self.button_pixel_indices.get(idx)
+            
+            if page_change_mode:
+                self.pixels[pixel_index] = (0, 0, 0)
+            elif idx == locked_bank_idx:
+                self.pixels[pixel_index] = cfg.PAGE_COLORS[page_idx][idx]
+            else:
+                self.pixels[pixel_index] = (0, 0, 0)
+
+        if page_change_mode or page_just_changed:
+            indicator_idx = page_idx % 4
+            if indicator_idx == blink_idx and blink_off:
+                self.pixels[indicator_idx] = (0, 0, 0)
+            else:
+                self.pixels[indicator_idx] = cfg.PAGE_INDICATOR_COLOR
+                
+        # 記錄當前 Page 的專屬顏色 (白、紅、黃、綠)
+        PAGE_BASE_COLORS = [(255, 255, 255), (255, 0, 0), (255, 255, 0), (0, 255, 0)]
+        self.current_page_color = PAGE_BASE_COLORS[page_idx % 4]
+
+    def indicate_locked_bank(self, page_idx, locked_bank_idx):
+        """正確點亮當前鎖定 Bank 的按鈕燈號（對應白、紅、黃、綠），其餘熄滅"""
+        PAGE_COLORS = [
+            (255, 255, 255), # Page 1: 白
+            (255, 0, 0),     # Page 2: 紅
+            (255, 255, 0),   # Page 3: 黃
+            (0, 255, 0)      # Page 4: 綠
+        ]
+        safe_page_idx = page_idx % 4
+        current_color = PAGE_COLORS[safe_page_idx]
+
+        for idx, pix_idx in self.button_pixel_indices.items():
+            if idx == locked_bank_idx:
+                self.pixels[pix_idx] = current_color
+            else:
+                self.pixels[pix_idx] = (0, 0, 0)
+
+    def update_record_mode_buttons(self, slot_states, set_flash=-1, reject=(-1, False)):
+        """Draw Record Mode slot states on buttons. Overlay set flash and reject blink."""
+        now = time.monotonic()
+        for idx, state in enumerate(slot_states):
+            pixel_index = self.button_pixel_indices[idx]
+            if state == "recording":
+                self.pixels[pixel_index] = cfg.RECORD_RECORDING_COLOR
+            elif state == "delete_armed":
+                blink_on = int(now / cfg.RECORD_DELETE_BLINK_S) % 2 == 0
+                self.pixels[pixel_index] = cfg.RECORD_RECORDING_COLOR if blink_on else (0, 0, 0)
+            elif state == "playing":
+                self.pixels[pixel_index] = cfg.RECORD_PLAYING_COLOR
+            elif state == "stopped":
+                self.pixels[pixel_index] = cfg.RECORD_STOPPED_COLOR
+            else:  # empty
+                self.pixels[pixel_index] = (0, 0, 0)
+
+        # CC-set navigation flash (overlays the slot states): light the landed
+        # set's bank button in the page color; the global set blanks all four.
+        if set_flash == 0:
+            for idx in range(4):
+                self.pixels[self.button_pixel_indices[idx]] = (0, 0, 0)
+        elif set_flash > 0:
+            bank = (set_flash - 1) % 4
+            page = (set_flash - 1) // 4
+            self.pixels[self.button_pixel_indices[bank]] = cfg.RECORD_PAGE_FLASH_COLORS[page]
+
+        # Low-memory record-reject blink (overlays everything): red on / off on
+        # the refused pad for ~3 cycles.
+        reject_slot, reject_on = reject
+        if reject_slot != -1:
+            self.pixels[self.button_pixel_indices[reject_slot]] = (
+                cfg.RECORD_RECORDING_COLOR if reject_on else (0, 0, 0))
+
+    def update_mapping_mode(self, target_slider_idx, confirm_slider_idx, confirm_active,
+                            confirm_failed, bank_button_idx=-1, bank_page_idx=0):
+        """Draw Mapping Mode: target slider blue blink, confirm flash (green/red), bank button lit."""
+        self.clear()
+
+        blink_on = int(time.monotonic() / cfg.MAPPING_BLINK_S) % 2 == 0
+
+        if target_slider_idx != -1:
+            color = cfg.MAPPING_COLOR if blink_on else (0, 0, 0)
+            for pix_idx in self.slider_pixel_indices[target_slider_idx]:
+                self.pixels[pix_idx] = color
+
+        if confirm_active and confirm_slider_idx != -1:
+            confirm_color = cfg.MAPPING_FAIL_COLOR if confirm_failed else cfg.MAPPING_CONFIRM_COLOR
+            for pix_idx in self.slider_pixel_indices[confirm_slider_idx]:
+                self.pixels[pix_idx] = confirm_color
+
+        # Bank scope keeps the locked bank's button solid at its normal color;
+        # global scope leaves all four dark (handled by bank_button_idx == -1).
+        for idx in range(4):
+            if idx == bank_button_idx:
+                self.pixels[self.button_pixel_indices[idx]] = cfg.PAGE_COLORS[bank_page_idx][idx]
+            else:
+                self.pixels[self.button_pixel_indices[idx]] = (0, 0, 0)
+
+        # Indicator pixel ("top LED") blinks blue in sync for the whole session.
+        self.pixels[self.indicator_pixel_index] = cfg.MAPPING_COLOR if blink_on else (0, 0, 0)
+
+    def update_mode_hold_progress(self, pixels_lit):
+        """
+        Overlays the hold-all-four-buttons progress fill: button pixels fill
+        red one at a time, bottom to top. Draw after the normal button-pixel
+        pass in either mode.
+
+        Args:
+            pixels_lit (int): Number of pixels to light (0-4).
+        """
+        for idx in range(min(pixels_lit, 4)):
+            self.pixels[self.button_pixel_indices[idx]] = cfg.RECORD_RECORDING_COLOR
+
+    def record_mode_toggle_animation(self, entering):
+        """
+        Brief blocking confirmation animation when Record Mode toggles
+        (~300 ms): a red sweep up the button pixels on enter, down on exit.
+
+        Args:
+            entering (bool): True if Record Mode was just entered.
+        """
+        order = [0, 1, 2, 3] if entering else [3, 2, 1, 0]
+        for idx in range(4):
+            self.pixels[self.button_pixel_indices[idx]] = (0, 0, 0)
+        self.pixels.show()
+        for idx in order:
+            self.pixels[self.button_pixel_indices[idx]] = cfg.RECORD_RECORDING_COLOR
+            self.pixels.show()
+            time.sleep(0.06)
+        time.sleep(0.06)
+        for idx in range(4):
+            self.pixels[self.button_pixel_indices[idx]] = (0, 0, 0)
+        self.pixels.show()
+
+    def indicate_jump_mode(self, enabled):
+        """記錄 Jump Mode 狀態，但不直接在這裡操作燈光"""
+        self._is_jump_mode = enabled
+
+    def show_pixels(self):
+        """Write pixel state to NeoPixel strip. (終極攔截點)"""
+        # 在訊號送出給 LED 前的最後一刻，強制寫入我們想要的顏色
+        is_jump = getattr(self, '_is_jump_mode', False)
+        
+        if is_jump:
+            self.pixels[self.indicator_pixel_index] = cfg.JUMP_MODE_COLOR
+        else:
+            # 安全讀取攔截到的頁碼，預設為 0 (第一頁)
+            page_idx = getattr(self, '_last_seen_page', 0)
+            PAGE_BASE_COLORS = [(255, 255, 255), (255, 0, 0), (255, 255, 0), (0, 255, 0)]
+            self.pixels[self.indicator_pixel_index] = PAGE_BASE_COLORS[page_idx % 4]
+                
+        self.pixels.show()
+
+    def startup_animation(self):
+        """Play rainbow animation on startup; red blinks if read-only."""
+        readonly = storage.getmount("/").readonly
+        if readonly:
+            # Blink all pixels red 3 times before starting the animation
+            for _ in range(3):
+                self.pixels.fill((255, 0, 0))
+                self.pixels.show()
+                time.sleep(0.2)
+                self.pixels.fill((0, 0, 0))
+                self.pixels.show()
+                time.sleep(0.2)
+
+        self.rainbow_animation(speed=0.002, cycles=2, duration=2.0)
+
+    def rainbow_animation(self, speed=0.01, cycles=3, duration=None):
+        """Smooth rainbow animation cycling across pixels; runs for optional duration."""
+        def wheel(pos):
+            """Rainbow colors for 0-255 positions."""
+            if pos < 85:
+                return (255 - pos * 3, pos * 3, 0)
+            elif pos < 170:
+                pos -= 85
+                return (0, 255 - pos * 3, pos * 3)
+            else:
+                pos -= 170
+                return (pos * 3, 0, 255 - pos * 3)
+        
+        start_time = time.monotonic()
+        try:
+            while True:
+                # Check if we've exceeded the time limit
+                if duration is not None and (time.monotonic() - start_time) > duration:
+                    break
+                    
+                for j in range(256):
+                    # Check time limit within the inner loop too
+                    if duration is not None and (time.monotonic() - start_time) > duration:
+                        break
+                        
+                    for i in range(self.num_pixels):
+                        # Distribute the colors evenly across the strip with multiple cycles
+                        position = (i * 256 * cycles // self.num_pixels + j) % 256
+                        self.pixels[i] = wheel(position)
+                    self.show_pixels()
+                    time.sleep(speed)
+        except KeyboardInterrupt:
+            pass
+            
+        # Clean up after animation ends
+        self.clear()
+        self.show_pixels()

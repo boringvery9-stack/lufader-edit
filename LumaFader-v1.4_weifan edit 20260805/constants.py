@@ -1,0 +1,117 @@
+from settings import settings
+
+LONG_HOLD_THRESH_S = 0.5
+DOUBLE_PRESS_TIME = 0.3  # Time in seconds to detect double press
+CC_THRESHOLD = 2
+
+# Slider LEDs show the last-sent value until the slider comes within this many CC steps of it.
+SLIDER_LIGHT_PICKUP_THRESHOLD = 4
+
+# Adaptive Smoothing Constants
+ADAPTIVE_STABLE_THRESHOLD_CC = 3  # CC threshold when in stable mode
+ADAPTIVE_MOVING_THRESHOLD_CC = 1  # CC threshold when in moving mode
+ADAPTIVE_HOLD_DURATION = 1.0      # Time to wait before switching to stable mode (seconds)
+ADAPTIVE_SMOOTHING_FACTOR = 0.3   # Exponential smoothing factor for raw values
+ADAPTIVE_RAW_TO_CC_DIVISOR = 512  # ADC range (65536) / CC range (128)
+
+MIN_CC_VALUE = 0
+MAX_CC_VALUE = 127
+
+# Record Mode (firmware constants, not settings)
+RECORD_MODE_HOLD_S = 3.0        # Hold all four buttons this long to toggle Record Mode
+RECORD_MODE_HOLD_STEP_S = 0.75  # One button pixel of red fill per step (4 * 0.75 = 3.0)
+DELETE_CONFIRM_WINDOW_S = 1.5   # Armed delete cancels after this long with no confirm
+MAX_LOOP_EVENTS = 4000          # Per-loop CC/AT event cap. One recording captures
+                                # ALL moving faders, so this must cover a fully-
+                                # active 60s loop without truncating. ~5.3 bytes/
+                                # event -> 4 full loops ~85KB of ~160KB free, with
+                                # only one loop ever growing at a time (measured
+                                # via test_record_memory).
+MAX_LOOP_MS = 60000             # Per-loop length cap (forced by 'H' array timestamp width)
+MEMORY_CRITICAL_THRESHOLD = 40000  # gc.mem_free() floor; an in-flight recording
+                                # auto-stops below this. Raised from 15000 after
+                                # on-device measurement: with 4 pads per CC set the heap fragments,
+                                # and uniform 1500-event pads crashed growing the
+                                # 14th pad at ~41.6 KB free. This backstop sits
+                                # just above that band.
+GUARANTEED_LOOP_EVENTS = 1500   # The "full loop" size START_RECORD_FLOOR guarantees
+                                # room for, even if the user makes this last one big.
+START_RECORD_FLOOR = 50000      # gc.mem_free() must be >= this to START a new
+                                # recording (else it's refused; the pad triple-
+                                # blinks). Static threshold compared to live free;
+                                # reserves nothing. 50 KB refuses the doomed pad-14
+                                # (49.2 KB free) before it can crash mid-growth.
+RECORD_REJECT_BLINK_S = 0.15    # Phase length of the 3x red reject blink shown when
+                                # a recording is refused for low memory.
+# NUM_RECORD_CC_SETS is derived from PAGES below (global bank + every page's banks).
+
+# Mapping Mode (on-device MIDI learn)
+MAPPING_LOW_THRESH = 3          # wiggle: low-extreme zone is cc_value <= this
+MAPPING_HIGH_THRESH = 125       # wiggle: high-extreme zone is cc_value >= this
+MAPPING_WIGGLE_HITS = 3         # alternating zone entries required
+MAPPING_WIGGLE_WINDOW_S = 3.0   # all hits must land within this window
+MAPPING_SELECT_DELTA = 5        # cc_value movement that (re)selects a learn target
+MAPPING_LEARN_HITS = 3          # consecutive same-(cc,ch) messages required to commit a mapping
+MAPPING_LEARN_WINDOW_S = 1.0    # max gap between those messages (a knob twist is a fast stream)
+MAPPING_CONFIRM_S = 0.5         # green/red confirm flash duration
+MAPPING_BLINK_S = 0.25          # blue blink phase length (on 0.25s / off 0.25s)
+MAPPING_COLOR = (0, 0, 255)         # blue
+MAPPING_CONFIRM_COLOR = (0, 255, 0)  # green
+MAPPING_FAIL_COLOR = (255, 0, 0)     # red
+
+GLOBAL_CC_BANK = settings.get_global_cc_bank()
+PAGES = settings.get_all_pages()
+
+# Set 0 = global bank; sets 1+ map to page (N-1)//4, bank (N-1)%4. No wrap.
+NUM_RECORD_CC_SETS = 1 + len(PAGES) * 4
+
+# Colors
+GLOBAL_BANK_COLOR = (200, 155, 55)  # A separate color for the global bank
+JUMP_MODE_COLOR = (255, 140, 0)     # Orange for jump mode (matches COLORS["ORANGE"])
+REG_MODE_COLOR = (0, 255, 0)        # Green for regular mode
+PAGE_INDICATOR_COLOR = (255, 255, 255)  # White for page indicator
+
+# Record Mode colors / timing
+RECORD_RECORDING_COLOR = (255, 0, 0)   # Solid red while recording (also hold-fill color)
+RECORD_PLAYING_COLOR = (0, 255, 0)     # Green while a loop plays
+RECORD_STOPPED_COLOR = (255, 255, 255)  # White while a recorded loop is stopped. White
+                                        # (not the bank color) so recording (red) /
+                                        # playing (green) / stopped read clearly even
+                                        # when the bank's own color is red or green.
+RECORD_DELETE_BLINK_S = 0.15           # Delete-armed red blink phase length
+RECORD_SET_FLASH_S = 0.25              # CC-set navigation flash duration
+# Each CC-set step flashes the landed bank button in its page color; global set blanks all four.
+RECORD_PAGE_FLASH_COLORS = [
+    (0, 120, 255),    # page 1 - blue
+    (0, 255, 120),    # page 2 - green
+    (255, 0, 200),    # page 3 - magenta
+    (255, 140, 0),    # page 4 - orange
+]
+
+COLORS = {
+    "WHITE": (255, 255, 255),
+    "RED": (255, 0, 0),
+    "GREEN": (0, 255, 0),
+    "BLUE": (0, 0, 255),
+    "CYAN": (0, 255, 255),
+    "MAGENTA": (255, 0, 255),
+    "ORANGE": (255, 140, 0),
+    "LIME": (170, 255, 0),
+    "TEAL": (0, 128, 128),
+    "NAVY": (0, 0, 128),
+    "BROWN": (165, 42, 42),
+    "GOLD": (255, 200, 0),
+    "YELLOW": (255, 255, 0),
+    "INDIGO": (75, 0, 130),
+    "CORAL": (255, 127, 80),
+    "FUCHSIA": (255, 0, 128),
+    "TOMATO": (255, 85, 65),
+}
+# 修改為：Page 1 白、Page 2 紅、Page 3 黃、Page 4 綠
+# 透過 * 4 讓該 Page 內的 4 個 Bank 都保持相同顏色，維持底層資料結構相容性
+PAGE_COLORS = [
+    [COLORS["WHITE"]] * 4,   # Page 1: 白
+    [COLORS["RED"]] * 4,     # Page 2: 紅
+    [COLORS["YELLOW"]] * 4,  # Page 3: 黃
+    [COLORS["GREEN"]] * 4,   # Page 4: 綠
+]
